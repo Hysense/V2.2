@@ -3,5 +3,338 @@ local uis = game:GetService("UserInputService")
 if uis.TouchEnabled then
 	loadstring(game:HttpGet("https://raw.githubusercontent.com/Hysense/V2.2/refs/heads/main/MOBILE"))()
 else
-	loadstring(game:HttpGet("https://raw.githubusercontent.com/Hysense/V2.2/refs/heads/main/PC"))()
+	if getgenv().SilentAimScript then
+    getgenv().SilentAimScript:Shutdown()
+end
+
+local SilentAimScript = {}
+getgenv().SilentAimScript = SilentAimScript
+
+local plrs = game:GetService("Players")
+local rs = game:GetService("RunService")
+local uis = game:GetService("UserInputService")
+local workspace = game:GetService("Workspace")
+local cam = workspace.CurrentCamera
+local coreGui = game:GetService("CoreGui")
+local plr = plrs.LocalPlayer
+local mouse = plr:GetMouse()
+local fovVisible = true
+local fovSize = 150
+local fovColor = Color3.fromRGB(0, 0, 0)
+
+
+getgenv().BulletConfig = {
+    Enabled = false,
+    Target = nil,
+    Part = "Head",
+    Key = Enum.KeyCode.C,
+    Prediction = 0
+}
+
+
+
+local spectateEnabled = false
+local spectateKey = Enum.KeyCode.Z
+local manuallyLocked = false
+local lockedPlayerId = nil 
+local scriptShutdown = false
+
+local hl = Instance.new("Highlight")
+hl.FillColor = Color3.fromRGB(0, 0, 0)
+hl.OutlineColor = Color3.fromRGB(200, 200, 200)
+hl.FillTransparency = 0.7
+hl.Enabled = false
+hl.Parent = coreGui
+
+local tracer = Drawing.new("Line")
+tracer.Visible = false
+tracer.Color = Color3.fromRGB(0, 0, 0)
+tracer.Thickness = 1
+
+local statusText = Drawing.new("Text")
+statusText.Visible = false
+statusText.Center = true
+statusText.Outline = false
+statusText.Font = Drawing.Fonts.UI
+statusText.Color = Color3.fromRGB(0, 0, 0)
+statusText.Size = 22
+
+local fovCircle = Drawing.new("Circle")
+fovCircle.Visible = fovVisible
+fovCircle.Radius = fovSize
+fovCircle.Color = fovColor
+fovCircle.Thickness = 1
+fovCircle.Filled = false
+fovCircle.NumSides = 64
+fovCircle.Transparency = 0.75
+
+
+
+local function getTargetPos(t)
+    if not t or not t.Character then return nil end
+    local char = t.Character
+    local part = char:FindFirstChild(getgenv().BulletConfig.Part, true)
+    if not part then return nil end
+
+    local shakeRadius = 1.2
+    local randomDirection = Vector3.new(math.random() * 2 - 1, math.random() * 2 - 1, math.random() * 2 - 1).Unit
+    local randomMagnitude = math.random() * shakeRadius
+    local shakeOffset = randomDirection * randomMagnitude
+
+    return part.Position + shakeOffset + (part.Velocity * getgenv().BulletConfig.Prediction)
+end
+
+local function applyHighlight(t)
+    if t and t.Character then
+        hl.Adornee = t.Character
+        hl.Enabled = true
+    else
+        hl.Adornee = nil
+        hl.Enabled = false
+    end
+end
+
+local function stopSpectate()
+    if plr.Character and plr.Character:FindFirstChild("Humanoid") and cam.CameraSubject ~= plr.Character.Humanoid then
+        cam.CameraSubject = plr.Character.Humanoid
+    end
+end
+
+local function startSpectate(target)
+    if spectateEnabled and target and target.Character and target.Character:FindFirstChild("Humanoid") then
+        cam.CameraSubject = target.Character.Humanoid
+    end
+end
+
+local characterAddedConnection
+local diedConnection
+
+local function setLock(t)
+    if characterAddedConnection then characterAddedConnection:Disconnect() end
+    manuallyLocked = (t ~= nil)
+
+    if t then
+        lockedPlayerId = t.UserId
+        applyHighlight(t)
+        if spectateEnabled then startSpectate(t) end
+        characterAddedConnection = t.CharacterAdded:Connect(function(char)
+            task.wait(0.1)
+            applyHighlight({Character = char})
+        end)
+    else
+        lockedPlayerId = nil
+        applyHighlight(nil)
+        stopSpectate()
+    end
+end
+
+
+local getStatus, getClosest
+
+getStatus = function(target)
+    if not target or not target.Character or not target.Character.Parent then
+        return "[stomped]"
+    end
+    local humanoid = target.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then
+        return "[stomped]"
+    end
+    local bodyEffects = target.Character:FindFirstChild("BodyEffects")
+    if bodyEffects and bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value == true then
+        return "[knocked]"
+    end
+    return "[alive]"
+end
+
+getClosest = function()
+    local closestDistSqr = math.huge
+    local bestTarget = nil
+    local mousePos = uis:GetMouseLocation()
+    local targetParts = {"Head", "UpperTorso", "LowerTorso"}
+    local fovSizeSqr = fovSize * fovSize
+
+    for _, player in ipairs(plrs:GetPlayers()) do
+        if player ~= plr and player.Character then
+            local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                for _, partName in ipairs(targetParts) do
+                    local part = player.Character:FindFirstChild(partName)
+                    if part then
+                        local screenPos, onScreen = cam:WorldToViewportPoint(part.Position)
+                        if onScreen then
+                            local dx = screenPos.X - mousePos.X
+                            local dy = screenPos.Y - mousePos.Y
+                            local distSqr = dx*dx + dy*dy
+
+                            if distSqr < closestDistSqr and distSqr < fovSizeSqr then
+                                closestDistSqr = distSqr
+                                bestTarget = player
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return bestTarget
+end
+
+local mt = getrawmetatable(game)
+local oldIndex = mt.__index
+local connections = {}
+
+function SilentAimScript:Shutdown()
+    scriptShutdown = true
+    for _, conn in ipairs(connections) do
+        conn:Disconnect()
+    end
+    if hl then hl:Destroy() end
+    if tracer then tracer:Destroy() end
+    if statusText then statusText:Destroy() end
+    if fovCircle then fovCircle:Destroy() end
+    stopSpectate()
+    if diedConnection then diedConnection:Disconnect() end
+    if characterAddedConnection then characterAddedConnection:Disconnect() end
+    setreadonly(mt, false)
+    mt.__index = oldIndex
+    setreadonly(mt, true)
+end
+
+local function onCharacterAdded(character)
+    if diedConnection then diedConnection:Disconnect() end
+    local humanoid = character:WaitForChild("Humanoid")
+    getgenv().BulletConfig.Enabled = true
+    diedConnection = humanoid.Died:Connect(function()
+        getgenv().BulletConfig.Enabled = false
+        if manuallyLocked then setLock(nil) end
+    end)
+end
+
+table.insert(connections, plr.CharacterAdded:Connect(onCharacterAdded))
+if plr.Character then onCharacterAdded(plr.Character) end
+
+table.insert(connections, uis.InputBegan:Connect(function(i, g)
+    if g then return end
+    if scriptShutdown then return end
+    if i.KeyCode == getgenv().BulletConfig.Key then
+        if manuallyLocked then setLock(nil)
+        else if getgenv().BulletConfig.Target then setLock(getgenv().BulletConfig.Target) end end
+    elseif i.KeyCode == spectateKey then
+        spectateEnabled = not spectateEnabled
+        if manuallyLocked and getgenv().BulletConfig.Target then
+            if spectateEnabled then startSpectate(getgenv().BulletConfig.Target) else stopSpectate() end
+        elseif not spectateEnabled then stopSpectate() end
+    end
+end))
+
+local frameCounter = 0
+table.insert(connections, plrs.PlayerAdded:Connect(function(player)
+    if player.UserId == lockedPlayerId then
+        player.CharacterAdded:Connect(function(character)
+            applyHighlight({Character = character})
+        end)
+    end
+end))
+
+table.insert(connections, rs.RenderStepped:Connect(function()
+    if scriptShutdown then return end
+    frameCounter = frameCounter + 1
+    local mousePos = uis:GetMouseLocation()
+    local targetForThisFrame = getgenv().BulletConfig.Target 
+
+    fovCircle.Position = mousePos
+    fovCircle.Visible = fovVisible and not manuallyLocked
+    fovCircle.Radius = fovSize
+
+    if manuallyLocked and lockedPlayerId then
+        targetForThisFrame = plrs:GetPlayerByUserId(lockedPlayerId)
+        if not targetForThisFrame then 
+            setLock(nil)
+        end
+    else
+        if frameCounter % 5 == 0 then
+            targetForThisFrame = getClosest()
+        end
+    end
+
+    if getgenv().BulletConfig.Target ~= targetForThisFrame then
+        getgenv().BulletConfig.Target = targetForThisFrame
+        applyHighlight(targetForThisFrame)
+    end
+    
+    local visualTarget = getgenv().BulletConfig.Target
+
+    getgenv().BulletConfig.Enabled = (visualTarget ~= nil)
+
+    if visualTarget then
+        statusText.Position = Vector2.new(mousePos.X + 35, mousePos.Y + 27)
+        statusText.Text = getStatus(visualTarget)
+        statusText.Visible = true
+
+        if visualTarget.Character and visualTarget.Character:FindFirstChild(getgenv().BulletConfig.Part) then
+            local targetPart = visualTarget.Character:FindFirstChild(getgenv().BulletConfig.Part)
+            if not targetPart then
+                 if tracer.Visible then tracer.Visible = false end
+                 return
+            end
+            local targetHeadPos = targetPart.Position
+            local screenPos, onScreen = cam:WorldToViewportPoint(targetHeadPos)
+            local tracerToPos
+
+            if onScreen then
+                tracerToPos = Vector2.new(screenPos.X, screenPos.Y)
+            else 
+                local viewport = cam.ViewportSize
+                local center = viewport / 2
+                local point = Vector2.new(screenPos.X, screenPos.Y)
+                if screenPos.Z < 0 then point = center - (point - center) end
+                local vec = point - center
+                if vec.Magnitude > 0 then
+                    local ratio = math.max(math.abs(vec.X / (viewport.X / 2)), math.abs(vec.Y / (viewport.Y / 2)))
+                    tracerToPos = center + (vec / ratio)
+                else
+                    tracerToPos = center
+                end
+            end
+            tracer.From = Vector2.new(mousePos.X, mousePos.Y)
+            tracer.To = tracerToPos
+            tracer.Visible = true
+        else
+            if tracer.Visible then tracer.Visible = false end
+        end
+    else
+        if tracer.Visible then tracer.Visible = false end
+        if statusText.Visible then statusText.Visible = false end
+    end
+end))
+
+task.spawn(function()
+    local aimParts = {"Head", "UpperTorso", "LowerTorso"}
+    local currentIndex = 1
+    while not scriptShutdown do
+        if getgenv().BulletConfig.Target then
+            currentIndex = (currentIndex % #aimParts) + 1
+            getgenv().BulletConfig.Part = aimParts[currentIndex]
+        end
+        task.wait(0.01)
+    end
+end)
+
+setreadonly(mt, false)
+mt.__index = newcclosure(function(self, k)
+    if scriptShutdown then return oldIndex(self, k) end
+    if not checkcaller() and self == mouse and getgenv().BulletConfig.Enabled and getgenv().BulletConfig.Target and getgenv().BulletConfig.Target.Character then
+        local humanoid = getgenv().BulletConfig.Target.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.Health > 0 then
+            local pos = getTargetPos(getgenv().BulletConfig.Target)
+            if pos then
+                if k == "Hit" then return CFrame.new(pos)
+                elseif k == "Target" then return getgenv().BulletConfig.Target.Character:FindFirstChild(getgenv().BulletConfig.Part) end
+            end
+        end
+    end
+    return oldIndex(self, k)
+end)
+setreadonly(mt, true)
+
 end
