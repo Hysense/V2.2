@@ -1,4 +1,6 @@
-if game.Players.LocalPlayer.DisplayName == "paper" then
+local player = game.LocalPlayer
+
+if player and player.DisplayName == "paper" then
 
     if getgenv().SilentAimScript then
     getgenv().SilentAimScript:Shutdown()
